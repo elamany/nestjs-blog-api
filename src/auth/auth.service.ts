@@ -1,4 +1,9 @@
-import { Injectable, UnauthorizedException, Logger, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  UnauthorizedException,
+  Logger,
+  BadRequestException,
+} from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -58,23 +63,50 @@ export class AuthService {
     return this.generateTokens(user.id, user.email, user.role, metadata);
   }
 
-    async logout(userId: number, refreshToken: string): Promise<void> {
-        if (!refreshToken) {
-            throw new BadRequestException('Refresh token is required in the request body');
-        }
-        const hashedToken = await bcrypt.hash(refreshToken, 10);
-        const tokenRecord = await this.refreshTokenRepository.findOne({
-            where: { userId, token: hashedToken, isRevoked: false },
-        });
-
-        if (tokenRecord) {
-            tokenRecord.isRevoked = true;
-            await this.refreshTokenRepository.save(tokenRecord);
-            this.logger.log(`User ${userId} logged out successfully`);
-        } else {
-            this.logger.warn(`Logout attempt with invalid or already revoked refresh token for user ${userId}`);
-        }
+  async logout(userId: number, refreshToken: string): Promise<void> {
+    if (!refreshToken) {
+      throw new BadRequestException(
+        'Refresh token is required in the request body',
+      );
     }
+
+    const activeTokens = await this.refreshTokenRepository.find({
+      where: { userId, isRevoked: false },
+    });
+
+    let matchedToken = null;
+    for (const tokenRecord of activeTokens) {
+      const isMatch = await bcrypt.compare(refreshToken, tokenRecord.token);
+      if (isMatch) {
+        matchedToken = tokenRecord;
+        break;
+      }
+    }
+
+    if (matchedToken) {
+      matchedToken.isRevoked = true;
+      await this.refreshTokenRepository.save(matchedToken);
+      this.logger.log(
+        `User ${userId} logged out successfully. Token ID: ${matchedToken.id}`,
+      );
+    } else {
+      this.logger.warn(
+        `Logout attempt with invalid/revoked token for user ${userId}`,
+      );
+      throw new UnauthorizedException(
+        'Invalid or already revoked refresh token',
+      );
+    }
+  }
+
+  async logoutAll(userId: number): Promise<void> {
+    const result = await this.refreshTokenRepository.update(
+      { userId, isRevoked: false },
+      { isRevoked: true }
+    );
+
+    this.logger.log(`User ${userId} forcefully logged out from all devices. Revoked ${result.affected} sessions.`);
+  }
 
   private async generateTokens(
     userId: number,
