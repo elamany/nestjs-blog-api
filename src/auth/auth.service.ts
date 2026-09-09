@@ -1,9 +1,4 @@
-import {
-  Injectable,
-  UnauthorizedException,
-  Logger,
-  BadRequestException,
-} from '@nestjs/common';
+import { Injectable, UnauthorizedException, Logger, BadRequestException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -14,6 +9,8 @@ import { RefreshToken } from './entities/refresh-token.entity';
 import { LoginDto } from './dto/login.dto';
 import { CreateUserDto } from '@/users/dto/create-user.dto';
 import { AuthResponseDto } from './dto/auth-response.dto';
+import { ActivityLogService } from '@/common/services/activity-log.service';
+import { ActivityAction } from '@/common/entities/activity-log.entity';
 
 export interface TokenMetadata {
   ipAddress?: string;
@@ -29,20 +26,28 @@ export class AuthService {
     private readonly usersService: UsersService,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
+    private readonly activityLogService: ActivityLogService,
     @InjectRepository(RefreshToken)
     private readonly refreshTokenRepository: Repository<RefreshToken>,
   ) {}
 
-  async register(createUserDto: CreateUserDto): Promise<{ message: string }> {
-    await this.usersService.create(createUserDto);
+  async register(createUserDto: CreateUserDto, metadata?: TokenMetadata): Promise<{ message: string }> {
+    const user = await this.usersService.create(createUserDto);
+
+    await this.activityLogService.saveLog({
+      userId: user.id,
+      action: ActivityAction.REGISTER,
+      description: 'New user account created',
+      resourceType: 'User',
+      resourceId: user.id,
+      metadata,
+    });
+
     this.logger.log(`New user account created: ${createUserDto.email}`);
     return { message: 'User registered successfully. Please log in.' };
   }
 
-  async login(
-    loginDto: LoginDto,
-    metadata?: TokenMetadata,
-  ): Promise<AuthResponseDto> {
+  async login(loginDto: LoginDto, metadata?: TokenMetadata): Promise<AuthResponseDto> {
     const user = await this.usersService.findByEmail(loginDto.email);
     if (!user) {
       throw new UnauthorizedException('Invalid email or password');
@@ -60,14 +65,23 @@ export class AuthService {
       throw new UnauthorizedException('Account is deactivated');
     }
 
-    return this.generateTokens(user.id, user.email, user.role, metadata);
+    const tokens = await this.generateTokens(user.id, user.email, user.role, metadata);
+
+    await this.activityLogService.saveLog({
+      userId: user.id,
+      action: ActivityAction.LOGIN,
+      description: 'User logged in successfully',
+      resourceType: 'User',
+      resourceId: user.id,
+      metadata,
+    });
+
+    return tokens;
   }
 
-  async logout(userId: number, refreshToken: string): Promise<void> {
+  async logout(userId: number, refreshToken: string, metadata?: TokenMetadata): Promise<void> {
     if (!refreshToken) {
-      throw new BadRequestException(
-        'Refresh token is required in the request body',
-      );
+      throw new BadRequestException('Refresh token is required in the request body');
     }
 
     const activeTokens = await this.refreshTokenRepository.find({
@@ -86,26 +100,39 @@ export class AuthService {
     if (matchedToken) {
       matchedToken.isRevoked = true;
       await this.refreshTokenRepository.save(matchedToken);
-      this.logger.log(
-        `User ${userId} logged out successfully. Token ID: ${matchedToken.id}`,
-      );
+
+      await this.activityLogService.saveLog({
+        userId,
+        action: ActivityAction.LOGOUT,
+        description: 'User logged out',
+        resourceType: 'User',
+        resourceId: userId,
+        metadata,
+      });
+
+      this.logger.log(`User ${userId} logged out successfully. Token ID: ${matchedToken.id}`);
     } else {
-      this.logger.warn(
-        `Logout attempt with invalid/revoked token for user ${userId}`,
-      );
-      throw new UnauthorizedException(
-        'Invalid or already revoked refresh token',
-      );
+      this.logger.warn(`Logout attempt with invalid/revoked token for user ${userId}`);
+      throw new UnauthorizedException('Invalid or already revoked refresh token');
     }
   }
 
-  async logoutAll(userId: number): Promise<void> {
+  async logoutAll(userId: number, metadata?: TokenMetadata): Promise<void> {
     const result = await this.refreshTokenRepository.update(
       { userId, isRevoked: false },
       { isRevoked: true }
     );
 
-    this.logger.log(`User ${userId} forcefully logged out from all devices. Revoked ${result.affected} sessions.`);
+    await this.activityLogService.saveLog({
+      userId,
+      action: ActivityAction.LOGOUT,
+      description: `User logged out from all devices (${result.affected} sessions revoked)`,
+      resourceType: 'User',
+      resourceId: userId,
+      metadata,
+    });
+
+    this.logger.log(`User ${userId} forcefully logged out. Revoked ${result.affected} sessions.`);
   }
 
   private async generateTokens(
@@ -153,9 +180,7 @@ export class AuthService {
       role: user!.role,
     };
 
-    this.logger.log(
-      `New session created for user ${userId} from ${metadata?.ipAddress || 'unknown IP'}`,
-    );
+    this.logger.log(`New session created for user ${userId} from ${metadata?.ipAddress || 'unknown IP'}`);
 
     return {
       accessToken,

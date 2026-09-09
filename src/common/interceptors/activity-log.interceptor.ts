@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { Observable, tap, catchError, throwError } from 'rxjs';
 import { Request, Response } from 'express';
-import { ActivityLogService } from '../services/activity-log.service';
+import { ActivityLogService, LogMetadata } from '../services/activity-log.service';
 import { ActivityAction } from '../entities/activity-log.entity';
 
 @Injectable()
@@ -22,24 +22,25 @@ export class ActivityLogInterceptor implements NestInterceptor {
     const userAgent = headers['user-agent'] || 'unknown';
     const ipAddress = (ip || request.socket.remoteAddress || 'unknown').replace('::ffff:', '');
     
-    //  Returns `number` if logged in, or `undefined` if not.
+    // Returns `number` if logged in, or `undefined` if not
     const userId = (request as any).user?.id;
 
     const { action, resourceType, resourceId, description } = this.parseRequestInfo(method, url);
+
+    const metadata: LogMetadata = { ipAddress, userAgent };
 
     return next.handle().pipe(
       tap(() => {
         const responseTime = Date.now() - startTime;
         const statusCode = response.statusCode;
 
-        this.activityLogService.create({
+        this.activityLogService.saveLog({
           userId,
           action,
-          description: `${description} - Success `,//(${statusCode}, ${responseTime}ms)
-          ipAddress,
-          userAgent,
+          description: `${description} - Success (${statusCode}, ${responseTime}ms)`,
           resourceType,
           resourceId,
+          metadata,
         });
       }),
       catchError((error) => {
@@ -47,14 +48,13 @@ export class ActivityLogInterceptor implements NestInterceptor {
         const statusCode = error.status || error.statusCode || 500;
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
-        this.activityLogService.create({
+        this.activityLogService.saveLog({
           userId,
           action,
-          description: `${description} - Failed (${statusCode}, ${errorMessage}`,//${responseTime}ms)
-          ipAddress,
-          userAgent,
+          description: `${description} - Failed (${statusCode}): ${errorMessage}`,
           resourceType,
           resourceId,
+          metadata, 
         });
 
         return throwError(() => error);

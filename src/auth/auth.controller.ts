@@ -6,19 +6,16 @@ import {
   HttpStatus,
   Req,
 } from '@nestjs/common';
-import {
-  ApiTags,
-  ApiOperation,
-  ApiResponse,
-  ApiBearerAuth,
-} from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 import type { Request } from 'express';
-import { AuthService, TokenMetadata } from './auth.service';
+import { AuthService } from './auth.service';
+import { LogMetadata } from '@/common/services/activity-log.service';
 import { CreateUserDto } from '@/users/dto/create-user.dto';
 import { LoginDto } from './dto/login.dto';
+import { LogoutDto } from './dto/logout.dto';
 import { AuthResponseDto } from './dto/auth-response.dto';
 import { Public } from './decorators/public.decorator';
-import { LogoutDto } from './dto/logout.dto';
+
 @ApiTags('Authentication')
 @Controller('auth')
 export class AuthController {
@@ -31,19 +28,17 @@ export class AuthController {
   @ApiResponse({ status: 409, description: 'Email already registered' })
   async register(
     @Body() createUserDto: CreateUserDto,
+    @Req() req: Request,
   ): Promise<{ message: string }> {
-    return this.authService.register(createUserDto);
+    const metadata = this.extractMetadata(req);
+    return this.authService.register(createUserDto, metadata);
   }
 
   @Public()
   @Post('login')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Login and get tokens' })
-  @ApiResponse({
-    status: 200,
-    description: 'Login successful',
-    type: AuthResponseDto,
-  })
+  @ApiResponse({ status: 200, description: 'Login successful', type: AuthResponseDto })
   @ApiResponse({ status: 401, description: 'Invalid credentials' })
   async login(
     @Body() loginDto: LoginDto,
@@ -64,7 +59,8 @@ export class AuthController {
     @Req() req: Request & { user: { id: number; email: string; role: string } },
     @Body() logoutDto: LogoutDto,
   ): Promise<{ message: string }> {
-    await this.authService.logout(req.user.id, logoutDto.refreshToken);
+    const metadata = this.extractMetadata(req);
+    await this.authService.logout(req.user.id, logoutDto.refreshToken, metadata);
     return { message: 'Logged out successfully' };
   }
 
@@ -77,25 +73,18 @@ export class AuthController {
   async logoutAll(
     @Req() req: Request & { user: { id: number; email: string; role: string } },
   ): Promise<{ message: string }> {
-    await this.authService.logoutAll(req.user.id);
+    const metadata = this.extractMetadata(req);
+    await this.authService.logoutAll(req.user.id, metadata);
     return { message: 'Logged out from all devices successfully' };
   }
 
-  private extractMetadata(req: Request): TokenMetadata {
+  private extractMetadata(req: Request): LogMetadata {
     const ip = req.ip || req.socket.remoteAddress || 'unknown';
     const userAgent = req.headers['user-agent'] || 'unknown';
-
-    let deviceName = 'Unknown Device';
-    if (userAgent.includes('Windows')) deviceName = 'Windows PC';
-    else if (userAgent.includes('Mac')) deviceName = 'Mac';
-    else if (userAgent.includes('Linux')) deviceName = 'Linux';
-    else if (userAgent.includes('iPhone')) deviceName = 'iPhone';
-    else if (userAgent.includes('Android')) deviceName = 'Android Device';
 
     return {
       ipAddress: ip.replace('::ffff:', ''),
       userAgent,
-      deviceName,
     };
   }
 }

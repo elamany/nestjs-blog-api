@@ -3,14 +3,18 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ActivityLog, ActivityAction } from '../entities/activity-log.entity';
 
-export interface CreateActivityLogDto {
-  userId?: number;
-  action: ActivityAction;
-  description?: string;
+export interface LogMetadata {
   ipAddress?: string;
   userAgent?: string;
+}
+
+export interface LogParams {
+  userId?: number;
+  action: ActivityAction;
+  description: string;
   resourceType?: string;
   resourceId?: number;
+  metadata?: LogMetadata;
 }
 
 @Injectable()
@@ -22,9 +26,18 @@ export class ActivityLogService {
     private readonly activityLogRepository: Repository<ActivityLog>,
   ) {}
 
-  async create(data: CreateActivityLogDto): Promise<void> {
+  // SINGLE ENTRY POINT for all logging across the app
+  async saveLog(params: LogParams): Promise<void> {
     try {
-      const log = this.activityLogRepository.create(data);
+      const log = this.activityLogRepository.create({
+        userId: params.userId,
+        action: params.action,
+        description: params.description,
+        ipAddress: params.metadata?.ipAddress,
+        userAgent: params.metadata?.userAgent,
+        resourceType: params.resourceType,
+        resourceId: params.resourceId,
+      });
       await this.activityLogRepository.save(log);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -32,7 +45,7 @@ export class ActivityLogService {
     }
   }
 
-  // For users to see their own logs
+  // for users to view their own logs
   async findMyLogs(
     userId: number,
     page: number = 1,
@@ -53,16 +66,17 @@ export class ActivityLogService {
     };
   }
 
-  // For admins to see ALL logs with optional filters
-  async findAll(
+  // for admin to view all logs with optional filters
+   async findAll(
     page: number = 1,
     limit: number = 50,
     userId?: number,
     action?: string,
   ): Promise<{ data: ActivityLog[]; total: number; page: number; totalPages: number }> {
-    const queryBuilder = this.activityLogRepository.createQueryBuilder('log');
+    const queryBuilder = this.activityLogRepository.createQueryBuilder('log')
+      .leftJoinAndSelect('log.user', 'user')
+      .addSelect(['user.id', 'user.firstName', 'user.lastName', 'user.email', 'user.role']);
 
-    // Apply filters if provided
     if (userId) {
       queryBuilder.andWhere('log.userId = :userId', { userId });
     }

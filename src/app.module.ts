@@ -7,7 +7,7 @@ import { ThrottlerGuard } from '@nestjs/throttler';
 import { UsersModule } from './users/users.module';
 import { AuthModule } from './auth/auth.module';
 import { ActivityLogModule } from './common/activity-log.module';
-import { ActivityLogInterceptor } from './common/interceptors/activity-log.interceptor';
+//import { ActivityLogInterceptor } from './common/interceptors/activity-log.interceptor';
 import { AdminModule } from './admin/admin.module';
 
 @Module({
@@ -51,10 +51,10 @@ import { AdminModule } from './admin/admin.module';
       provide: APP_GUARD,
       useClass: ThrottlerGuard,
     },
-    {
+    /*{
       provide: APP_INTERCEPTOR,
       useClass: ActivityLogInterceptor,
-    },
+    },*/
   ],
 })
 export class AppModule {}
