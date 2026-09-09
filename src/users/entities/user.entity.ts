@@ -5,13 +5,15 @@ import {
   CreateDateColumn,
   UpdateDateColumn,
   DeleteDateColumn,
+  OneToMany,
   Index,
 } from 'typeorm';
 import { Exclude } from 'class-transformer';
-import { UserRole } from '@/users/enums/user-role.enum';
+import { UserRole } from '../enums/user-role.enum';
+import { RefreshToken } from '@/auth/entities/refresh-token.entity';
 
 @Entity('users')
-@Index(['email'], { unique: true }) 
+@Index(['email'], { unique: true })
 @Index(['createdAt']) 
 export class User {
   @PrimaryGeneratedColumn()
@@ -27,11 +29,10 @@ export class User {
   email: string;
 
   @Column()
-  @Exclude() 
+  @Exclude()
   password: string;
 
   @Column({ default: true })
-  @Index() 
   isActive: boolean;
 
   @Column({
@@ -39,8 +40,13 @@ export class User {
     enum: UserRole,
     default: UserRole.USER,
   })
-  @Index() 
   role: UserRole;
+
+  @OneToMany(() => RefreshToken, (token) => token.user, {
+    cascade: true,
+    onDelete: 'CASCADE',
+  })
+  refreshTokens: RefreshToken[];
 
   @CreateDateColumn()
   createdAt: Date;
@@ -49,5 +55,5 @@ export class User {
   updatedAt: Date;
 
   @DeleteDateColumn()
-  deletedAt: Date; 
+  deletedAt: Date;
 }
