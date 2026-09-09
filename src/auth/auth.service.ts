@@ -28,15 +28,16 @@ export class AuthService {
     private readonly refreshTokenRepository: Repository<RefreshToken>,
   ) {}
 
-  async register(createUserDto: CreateUserDto, metadata?: TokenMetadata): Promise<AuthResponseDto> {
-    const user = await this.usersService.create(createUserDto);
-    return this.generateTokens(user.id, user.email, user.role, metadata);
-  }
+    async register(createUserDto: CreateUserDto): Promise<{ message: string }> {
+        await this.usersService.create(createUserDto);
+        this.logger.log(`New user account created: ${createUserDto.email}`);
+        return { message: 'User registered successfully. Please log in.' };
+    }
 
-  async login(loginDto: LoginDto, metadata?: TokenMetadata): Promise<AuthResponseDto> {
-    const user = await this.usersService.findByEmail(loginDto.email);
-    if (!user) {
-      throw new UnauthorizedException('Invalid email or password');
+    async login(loginDto: LoginDto, metadata?: TokenMetadata): Promise<AuthResponseDto> {
+        const user = await this.usersService.findByEmail(loginDto.email);
+        if (!user) {
+        throw new UnauthorizedException('Invalid email or password');
     }
 
     const isPasswordValid = await this.usersService.validatePassword(
