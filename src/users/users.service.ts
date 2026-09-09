@@ -74,4 +74,27 @@ export class UsersService {
     await this.usersRepository.update(id, { isActive: false });
     this.logger.log(`User deactivated: ${user.email}`);
   }
+
+  async getMyActivityLogs(
+    userId: number,
+    page: number = 1,
+    limit: number = 20,
+  ): Promise<{ data: any[]; total: number; page: number; totalPages: number }> {
+    const [data, total] = await this.usersRepository.manager
+      .getRepository('ActivityLog')
+      .findAndCount({
+        where: { userId },
+        order: { createdAt: 'DESC' },
+        skip: (page - 1) * limit,
+        take: limit,
+      });
+
+    return {
+      data,
+      total,
+      page,
+      totalPages: Math.ceil(total / limit),
+    };
+  }
+
 }

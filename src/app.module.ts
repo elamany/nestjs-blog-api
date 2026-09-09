@@ -2,9 +2,13 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ThrottlerModule, seconds } from '@nestjs/throttler';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ThrottlerGuard } from '@nestjs/throttler';
-import { UsersModule } from '@/users/users.module';
+import { UsersModule } from './users/users.module';
+import { AuthModule } from './auth/auth.module';
+import { ActivityLogModule } from './common/activity-log.module';
+import { ActivityLogInterceptor } from './common/interceptors/activity-log.interceptor';
+import { AdminModule } from './admin/admin.module';
 
 @Module({
   imports: [
@@ -25,7 +29,7 @@ import { UsersModule } from '@/users/users.module';
         database: config.get('DB_DATABASE'),
         autoLoadEntities: true,
         synchronize: config.get('NODE_ENV') !== 'production',
-        logging: config.get('NODE_ENV') === 'development', // Log SQL in dev
+        logging: config.get('NODE_ENV') === 'development',
       }),
     }),
 
@@ -38,11 +42,18 @@ import { UsersModule } from '@/users/users.module';
     ]),
 
     UsersModule,
+    AuthModule,
+    ActivityLogModule,
+    AdminModule, 
   ],
   providers: [
     {
       provide: APP_GUARD,
       useClass: ThrottlerGuard,
+    },
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: ActivityLogInterceptor,
     },
   ],
 })
