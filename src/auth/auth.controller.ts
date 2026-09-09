@@ -70,9 +70,9 @@ export class AuthController {
         else if (userAgent.includes('Android')) deviceName = 'Android Device';
 
         return {
-        ipAddress: ip.replace('::ffff:', ''),
-        userAgent,
-        deviceName,
+            ipAddress: ip.replace('::ffff:', ''),
+            userAgent,
+            deviceName,
         };
     }
 }

@@ -22,7 +22,7 @@ export class UsersService {
       this.logger.warn(
         `The email: ${createUserDto.email} is already registered, please use a different email address.`,
       );
-      throw new ConflictException('Email already registered');
+      throw new ConflictException('Email already registered, please use a different email or login');
     }
 
     const hashedPassword = await bcrypt.hash(createUserDto.password, 12);
