@@ -1,20 +1,22 @@
-import {
-  Injectable,
-  NotFoundException,
-  ForbiddenException,
-  Logger,
+import { 
+  Injectable, 
+  NotFoundException, 
+  ForbiddenException, 
+  Logger, 
+  BadRequestException 
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, IsNull } from 'typeorm';
+import { Repository } from 'typeorm';
 import { Post } from './entities/post.entity';
 import { PostImage } from './entities/post-image.entity';
 import { CreatePostDto } from './dto/create-post.dto';
 import { UpdatePostDto } from './dto/update-post.dto';
 import { QueryPostDto } from './dto/query-post.dto';
 import { PostStatus } from './enums/post-status.enum';
-import { ActivityLogService, LogMetadata,} from '@/common/services/activity-log.service';
+import { ActivityLogService, LogMetadata } from '@/common/services/activity-log.service';
 import { ActivityAction } from '@/common/entities/activity-log.entity';
 import { R2Service } from '@/common/services/r2.service';
+import { ImageProcessorService } from '@/common/services/image-processor.service';
 
 @Injectable()
 export class PostsService {
@@ -27,55 +29,87 @@ export class PostsService {
     private readonly postImagesRepository: Repository<PostImage>,
     private readonly activityLogService: ActivityLogService,
     private readonly r2Service: R2Service,
+    private readonly imageProcessorService: ImageProcessorService,
   ) {}
 
+  // CREATE POST
   async createPost(
     userId: number,
     createPostDto: CreatePostDto,
     metadata?: LogMetadata,
     files?: { coverImage?: Express.Multer.File[]; images?: Express.Multer.File[] },
   ) {
-    const post = this.postsRepository.create({
-      ...createPostDto,
-      authorId: userId,
-    });
+    let coverImageUrl: string | undefined = undefined;
+    const newImageRecordsData: any[] = [];
 
-    const savedPost = await this.postsRepository.save(post);
-
-    // Handle cover image upload
+    // Handle Cover Image
     if (files?.coverImage && files.coverImage.length > 0) {
       const coverFile = files.coverImage[0];
-      const { url } = await this.r2Service.uploadFile(coverFile, `posts/${savedPost.id}/cover`);
-      savedPost.coverImage = url;
-      await this.postsRepository.save(savedPost);
+      if (coverFile.size > 5 * 1024 * 1024) {
+        throw new BadRequestException('Cover image must be smaller than 5MB');
+      }
+      const processed = await this.imageProcessorService.processImage(coverFile);
+      const { url } = await this.r2Service.uploadBuffer(
+        processed.buffer,
+        processed.originalName,
+        `posts/cover`,
+        processed.mimeType,
+      );
+      coverImageUrl = url;
     }
 
-    //  Handle multiple images upload
+    // Handle multiple Images
     if (files?.images && files.images.length > 0) {
-      const imageRecords: PostImage[] = [];
-      
+      if (files.images.length > 10) {
+        throw new BadRequestException('A post can have a maximum of 10 images');
+      }
+
       for (let i = 0; i < files.images.length; i++) {
         const imageFile = files.images[i];
-        const { url, key } = await this.r2Service.uploadFile(
-          imageFile,
-          `posts/${savedPost.id}/images`,
+        if (imageFile.size > 5 * 1024 * 1024) {
+          throw new BadRequestException(`Image '${imageFile.originalname}' must be smaller than 5MB`);
+        }
+
+        const processed = await this.imageProcessorService.processImage(imageFile);
+        const { url, key } = await this.r2Service.uploadBuffer(
+          processed.buffer,
+          processed.originalName,
+          `posts/images`,
+          processed.mimeType,
         );
 
-        const imageRecord = this.postImagesRepository.create({
+        newImageRecordsData.push({
           url,
           key,
           altText: `Image ${i + 1}`,
           displayOrder: i,
-          postId: savedPost.id,
         });
-
-        imageRecords.push(imageRecord);
       }
-
-      await this.postImagesRepository.save(imageRecords);
     }
 
-    // Log the activity
+    // EXECUTE DATABASE TRANSACTION
+    const savedPost = await this.postsRepository.manager.transaction(async (transactionalEntityManager) => {
+      const txPostRepo = transactionalEntityManager.getRepository(Post);
+      const txImageRepo = transactionalEntityManager.getRepository(PostImage);
+
+      const post = txPostRepo.create({
+        ...createPostDto,
+        authorId: userId,
+        coverImage: coverImageUrl,
+      });
+      const newPost = await txPostRepo.save(post);
+
+      if (newImageRecordsData.length > 0) {
+        const imagesToSave = newImageRecordsData.map(imgData => ({
+          ...imgData,
+          postId: newPost.id,
+        }));
+        await txImageRepo.save(imagesToSave);
+      }
+
+      return newPost;
+    });
+
     await this.activityLogService.saveLog({
       userId,
       action: ActivityAction.CREATE_POST,
@@ -85,7 +119,169 @@ export class PostsService {
       metadata,
     });
 
-    return savedPost;
+    return this.postsRepository.findOne({
+      where: { id: savedPost.id },
+      relations: { images: true, author: true },
+    });
+  }
+
+  async updatePost(
+    id: number,
+    userId: number,
+    updatePostDto: UpdatePostDto,
+    metadata?: LogMetadata,
+    files?: { coverImage?: Express.Multer.File[]; images?: Express.Multer.File[] },
+  ) {
+    const post = await this.postsRepository.findOne({
+      where: { id },
+      relations: { images: true }, 
+    });
+
+    if (!post) throw new NotFoundException('Post not found');
+    if (post.authorId !== userId) {
+      throw new ForbiddenException('You have no permission to edit this post');
+    }
+
+    let keepIds: number[] = [];
+    if (updatePostDto.keepImageIds) {
+      if (typeof updatePostDto.keepImageIds === 'string') {
+        try {
+          keepIds = JSON.parse(updatePostDto.keepImageIds);
+        } catch {
+          keepIds = [];
+        }
+      } else if (Array.isArray(updatePostDto.keepImageIds)) {
+        keepIds = updatePostDto.keepImageIds;
+      }
+    }
+
+    const oldCoverUrl = post.coverImage;
+    let newCoverUrl = oldCoverUrl;
+
+    if (files?.coverImage && files.coverImage.length > 0) {
+      const coverFile = files.coverImage[0];
+      if (coverFile.size > 5 * 1024 * 1024) {
+        throw new BadRequestException('Cover image must be smaller than 5MB');
+      }
+
+      const processed = await this.imageProcessorService.processImage(coverFile);
+      const uploadResult = await this.r2Service.uploadBuffer(
+        processed.buffer,
+        processed.originalName,
+        `posts/${post.id}/cover`,
+        processed.mimeType,
+      );
+      newCoverUrl = uploadResult.url;
+    }
+
+    const newImageRecordsData: any[] = [];
+    if (files?.images && files.images.length > 0) {
+      const currentImageCount = (post.images || []).filter(img => keepIds.includes(img.id)).length;
+      
+      if (currentImageCount + files.images.length > 10) {
+        throw new BadRequestException('A post can have a maximum of 10 images');
+      }
+
+      for (let i = 0; i < files.images.length; i++) {
+        const imageFile = files.images[i];
+        if (imageFile.size > 5 * 1024 * 1024) {
+          throw new BadRequestException(`Image '${imageFile.originalname}' must be smaller than 5MB`);
+        }
+
+        const processed = await this.imageProcessorService.processImage(imageFile);
+        const { url, key } = await this.r2Service.uploadBuffer(
+          processed.buffer,
+          processed.originalName,
+          `posts/${post.id}/images`,
+          processed.mimeType,
+        );
+
+        newImageRecordsData.push({
+          url,
+          key,
+          altText: `Image ${currentImageCount + i + 1}`,
+          displayOrder: currentImageCount + i,
+          postId: post.id,
+        });
+      }
+    }
+
+    await this.postsRepository.manager.transaction(async (transactionalEntityManager) => {
+      const txPostRepo = transactionalEntityManager.getRepository(Post);
+      const txImageRepo = transactionalEntityManager.getRepository(PostImage);
+
+      const updateData: any = {
+        title: updatePostDto.title,
+        content: updatePostDto.content,
+        status: updatePostDto.status,
+      };
+
+      if (newCoverUrl !== oldCoverUrl) {
+        updateData.coverImage = newCoverUrl;
+      }
+
+      await txPostRepo.update(post.id, updateData);
+
+      // Delete old images from DB
+      const imagesToDelete = (post.images || []).filter(img => !keepIds.includes(img.id));
+      
+      if (imagesToDelete.length > 0) {
+        await txImageRepo.delete(imagesToDelete.map(img => img.id));
+      }
+
+      // Insert new images into DB
+      if (newImageRecordsData.length > 0) {
+        await txImageRepo.save(newImageRecordsData);
+      }
+    });
+
+    if (newCoverUrl !== oldCoverUrl && oldCoverUrl) {
+      const oldKey = this.extractKeyFromUrl(oldCoverUrl);
+      if (oldKey) {
+        await this.r2Service.deleteFile(oldKey).catch((err) => 
+          this.logger.warn(`Failed to delete old cover image from R2: ${err.message}`)
+        );
+      }
+    }
+
+    const imagesToDelete = (post.images || []).filter(img => !keepIds.includes(img.id));
+    for (const img of imagesToDelete) {
+      await this.r2Service.deleteFile(img.key).catch((err) => 
+        this.logger.warn(`Failed to delete old gallery image ${img.key} from R2: ${err.message}`)
+      );
+    }
+
+    await this.activityLogService.saveLog({
+      userId,
+      action: ActivityAction.UPDATE_POST,
+      description: `Updated post: ${post.title}`,
+      resourceType: 'Post',
+      resourceId: post.id,
+      metadata,
+    });
+
+    return this.postsRepository.findOne({
+      where: { id },
+      relations: { images: true, author: true },
+    });
+  }
+
+  // DELETE POST
+  async removePost(id: number, userId: number, metadata?: LogMetadata) {
+    const post = await this.findPostForUser(id, userId);
+
+    await this.postsRepository.softRemove(post);
+
+    await this.activityLogService.saveLog({
+      userId,
+      action: ActivityAction.DELETE_POST,
+      description: `Moved post to trash: ${post.title}`,
+      resourceType: 'Post',
+      resourceId: id,
+      metadata,
+    });
+
+    return { message: 'Post moved to trash successfully' };
   }
 
   async findAll(query: QueryPostDto) {
@@ -113,24 +309,15 @@ export class PostsService {
       .andWhere('post.deletedAt IS NULL')
       .andWhere('author.isActive = :isActive', { isActive: true });
 
-    // Search by title
     if (query.search) {
       queryBuilder.andWhere('post.title ILIKE :search', { search: `%${query.search}%` });
     }
 
-    queryBuilder
-      .orderBy('post.createdAt', 'DESC')
-      .skip(skip)
-      .take(limit);
+    queryBuilder.orderBy('post.createdAt', 'DESC').skip(skip).take(limit);
 
     const [data, total] = await queryBuilder.getManyAndCount();
 
-    return {
-      data,
-      total,
-      page,
-      totalPages: Math.ceil(total / limit),
-    };
+    return { data, total, page, totalPages: Math.ceil(total / limit) };
   }
 
   async findMyPosts(userId: number, query: QueryPostDto) {
@@ -141,30 +328,21 @@ export class PostsService {
     const queryBuilder = this.postsRepository
       .createQueryBuilder('post')
       .where('post.authorId = :userId', { userId })
-      .andWhere('post.deletedAt IS NULL'); // Exclude soft-deleted
+      .andWhere('post.deletedAt IS NULL');
 
-    // status filter
     if (query.status) {
       queryBuilder.andWhere('post.status = :status', { status: query.status });
     }
 
-    //  search
     if (query.search) {
-      queryBuilder.andWhere('post.title ILIKE :search', {
-        search: `%${query.search}%`,
-      });
+      queryBuilder.andWhere('post.title ILIKE :search', { search: `%${query.search}%` });
     }
 
     queryBuilder.orderBy('post.createdAt', 'DESC').skip(skip).take(limit);
 
     const [data, total] = await queryBuilder.getManyAndCount();
 
-    return {
-      data,
-      total,
-      page,
-      totalPages: Math.ceil(total / limit),
-    };
+    return { data, total, page, totalPages: Math.ceil(total / limit) };
   }
 
   async findAllForAdmin(query: QueryPostDto) {
@@ -183,34 +361,26 @@ export class PostsService {
         'author.role',
       ]);
 
-    //  filters
     if (query.status) {
       queryBuilder.andWhere('post.status = :status', { status: query.status });
     }
 
     if (query.search) {
-      queryBuilder.andWhere('post.title ILIKE :search', {
-        search: `%${query.search}%`,
-      });
+      queryBuilder.andWhere('post.title ILIKE :search', { search: `%${query.search}%` });
     }
 
     queryBuilder.orderBy('post.createdAt', 'DESC').skip(skip).take(limit);
 
     const [data, total] = await queryBuilder.getManyAndCount();
 
-    return {
-      data,
-      total,
-      page,
-      totalPages: Math.ceil(total / limit),
-    };
+    return { data, total, page, totalPages: Math.ceil(total / limit) };
   }
 
-  // SINGLE POST
+  //SINGLE POST
   async findOne(id: number, userId?: number, isAdmin?: boolean) {
     const queryBuilder = this.postsRepository
       .createQueryBuilder('post')
-      .withDeleted() // Required to find soft-deleted posts for permission checks
+      .withDeleted()
       .leftJoinAndSelect('post.author', 'author')
       .leftJoinAndSelect('post.images', 'images')
       .select([
@@ -240,17 +410,14 @@ export class PostsService {
       throw new NotFoundException('Post not found');
     }
 
-    //If author is inactive, ONLY admin can see the post
     if (!post.author.isActive && !isAdmin) {
       throw new ForbiddenException('You do not have permission to view this post');
     }
 
-    // If published and NOT deleted → anyone (with active author) can see
     if (post.status === PostStatus.PUBLISHED && !post.deletedAt) {
       return this.cleanPostResponse(post);
     }
 
-    // If soft-deleted  only admin can see
     if (post.deletedAt) {
       if (!isAdmin) {
         throw new ForbiddenException('You do not have permission to view this post');
@@ -258,7 +425,6 @@ export class PostsService {
       return this.cleanPostResponse(post);
     }
 
-    //  If draft/archived  only author or admin can see
     if (post.status === PostStatus.DRAFT || post.status === PostStatus.ARCHIVED) {
       if (!userId || (post.authorId !== userId && !isAdmin)) {
         throw new ForbiddenException('You do not have permission to view this post');
@@ -271,11 +437,9 @@ export class PostsService {
 
   private cleanPostResponse(post: any) {
     const clean = { ...post };
-    // Remove fields used only for backend logic
     delete clean.deletedAt;
     delete clean.authorId;
     
-    // Ensure author object is also clean
     if (clean.author) {
       delete clean.author.isActive;   
       delete clean.author.createdAt;
@@ -286,88 +450,6 @@ export class PostsService {
     return clean;
   }
 
-  async updatePost(
-    id: number,
-    userId: number,
-    updatePostDto: UpdatePostDto,
-    metadata?: LogMetadata,
-    files?: { coverImage?: Express.Multer.File[]; images?: Express.Multer.File[] },
-  ) {
-    const post = await this.findPostForUser(id, userId);
-
-    // Update text fields
-    Object.assign(post, updatePostDto);
-
-    // Handle new cover image (replaces old one)
-    if (files?.coverImage && files.coverImage.length > 0) {
-      // TODO: Delete old cover image from R2 if it exists
-      const coverFile = files.coverImage[0];
-      const { url } = await this.r2Service.uploadFile(coverFile, `posts/${post.id}/cover`);
-      post.coverImage = url;
-    }
-
-    const updatedPost = await this.postsRepository.save(post);
-
-    // Handle new images (appends to existing ones)
-    if (files?.images && files.images.length > 0) {
-      const existingImages = await this.postImagesRepository.find({
-        where: { postId: post.id },
-      });
-
-      const imageRecords: PostImage[] = [];
-
-      for (let i = 0; i < files.images.length; i++) {
-        const imageFile = files.images[i];
-        const { url, key } = await this.r2Service.uploadFile(
-          imageFile,
-          `posts/${post.id}/images`,
-        );
-
-        const imageRecord = this.postImagesRepository.create({
-          url,
-          key,
-          altText: `Image ${existingImages.length + i + 1}`,
-          displayOrder: existingImages.length + i,
-          postId: post.id,
-        });
-
-        imageRecords.push(imageRecord);
-      }
-
-      await this.postImagesRepository.save(imageRecords);
-    }
-
-    await this.activityLogService.saveLog({
-      userId,
-      action: ActivityAction.UPDATE_POST,
-      description: `Updated post: ${updatedPost.title}`,
-      resourceType: 'Post',
-      resourceId: updatedPost.id,
-      metadata,
-    });
-
-    return updatedPost;
-  }
-
-  // DELETE POST
-  async removePost(id: number, userId: number, metadata?: LogMetadata) {
-    const post = await this.findPostForUser(id, userId);
-
-    await this.postsRepository.softRemove(post);
-
-    await this.activityLogService.saveLog({
-      userId,
-      action: ActivityAction.DELETE_POST,
-      description: `Moved post to trash: ${post.title}`,
-      resourceType: 'Post',
-      resourceId: id,
-      metadata,
-    });
-
-    return { message: 'Post moved to trash successfully' };
-  }
-
-  // HELPER: Enforce ownership for edit/delete
   private async findPostForUser(id: number, userId: number): Promise<Post> {
     const post = await this.postsRepository.findOne({ where: { id } });
 
@@ -376,11 +458,18 @@ export class PostsService {
     }
 
     if (post.authorId !== userId) {
-      throw new ForbiddenException(
-        'You can only edit or delete your own posts',
-      );
+      throw new ForbiddenException('You can only edit or delete your own posts');
     }
 
     return post;
+  }
+
+  private extractKeyFromUrl(url: string): string | null {
+    try {
+      const urlObj = new URL(url);
+      return urlObj.pathname.substring(1);
+    } catch {
+      return null;
+    }
   }
 }

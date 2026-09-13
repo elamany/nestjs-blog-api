@@ -11,6 +11,7 @@ import {
   ParseIntPipe,
   UseInterceptors,
   UploadedFiles,
+  UseGuards,
 } from '@nestjs/common';
 import { FileFieldsInterceptor } from '@nestjs/platform-express';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiConsumes, ApiBody } from '@nestjs/swagger';
@@ -54,15 +55,18 @@ export class PostsController {
     FileFieldsInterceptor([
       { name: 'coverImage', maxCount: 1 },
       { name: 'images', maxCount: 10 },
-    ])
+    ], {
+      limits: {
+        fileSize: 5 * 1024 * 1024, // 5MB limit per file
+      },
+    })
   )
   async create(
     @Req() req: Request & { user: { id: number; role: UserRole } },
     @Body() createPostDto: CreatePostDto,
-    @UploadedFiles() files: { coverImage?: Express.Multer.File[]; images?: Express.Multer.File[] },
+    @UploadedFiles() files: { coverImage?: Express.Multer.File[]; images?: Express.Multer.File[] }, // ← Use Express.Multer.File
   ) {
     const metadata = this.extractMetadata(req);
-    
     return this.postsService.createPost(req.user.id, createPostDto, metadata, files);
   }
 
@@ -115,18 +119,26 @@ export class PostsController {
         title: { type: 'string' },
         content: { type: 'string' },
         status: { type: 'string', enum: ['draft', 'published', 'archived'] },
+        keepImageIds: { type: 'array', items: { type: 'number' }, description: 'IDs of existing images to keep' },
         coverImage: { type: 'string', format: 'binary' },
         images: { type: 'array', items: { type: 'string', format: 'binary' } },
       },
     },
   })
   @UseInterceptors(
-    FileFieldsInterceptor([
-      { name: 'coverImage', maxCount: 1 },
-      { name: 'images', maxCount: 10 },
-    ])
+    FileFieldsInterceptor(
+      [
+        { name: 'coverImage', maxCount: 1 },
+        { name: 'images', maxCount: 10 },
+      ],
+      {
+        limits: {
+          fileSize: 5 * 1024 * 1024, // 5MB limit per file
+        },
+      }
+    )
   )
-  async update(
+  async updatePost(
     @Param('id', ParseIntPipe) id: number,
     @Req() req: Request & { user: { id: number } },
     @Body() updatePostDto: UpdatePostDto,
