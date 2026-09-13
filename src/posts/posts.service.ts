@@ -14,6 +14,7 @@ import { QueryPostDto } from './dto/query-post.dto';
 import { PostStatus } from './enums/post-status.enum';
 import { ActivityLogService, LogMetadata,} from '@/common/services/activity-log.service';
 import { ActivityAction } from '@/common/entities/activity-log.entity';
+import { R2Service } from '@/common/services/r2.service';
 
 @Injectable()
 export class PostsService {
@@ -25,13 +26,14 @@ export class PostsService {
     @InjectRepository(PostImage)
     private readonly postImagesRepository: Repository<PostImage>,
     private readonly activityLogService: ActivityLogService,
+    private readonly r2Service: R2Service,
   ) {}
 
   async createPost(
     userId: number,
     createPostDto: CreatePostDto,
     metadata?: LogMetadata,
-    files?: { coverImage?: Express.Multer.File[]; images?: Express.Multer.File[] }
+    files?: { coverImage?: Express.Multer.File[]; images?: Express.Multer.File[] },
   ) {
     const post = this.postsRepository.create({
       ...createPostDto,
@@ -40,6 +42,40 @@ export class PostsService {
 
     const savedPost = await this.postsRepository.save(post);
 
+    // Handle cover image upload
+    if (files?.coverImage && files.coverImage.length > 0) {
+      const coverFile = files.coverImage[0];
+      const { url } = await this.r2Service.uploadFile(coverFile, `posts/${savedPost.id}/cover`);
+      savedPost.coverImage = url;
+      await this.postsRepository.save(savedPost);
+    }
+
+    //  Handle multiple images upload
+    if (files?.images && files.images.length > 0) {
+      const imageRecords: PostImage[] = [];
+      
+      for (let i = 0; i < files.images.length; i++) {
+        const imageFile = files.images[i];
+        const { url, key } = await this.r2Service.uploadFile(
+          imageFile,
+          `posts/${savedPost.id}/images`,
+        );
+
+        const imageRecord = this.postImagesRepository.create({
+          url,
+          key,
+          altText: `Image ${i + 1}`,
+          displayOrder: i,
+          postId: savedPost.id,
+        });
+
+        imageRecords.push(imageRecord);
+      }
+
+      await this.postImagesRepository.save(imageRecords);
+    }
+
+    // Log the activity
     await this.activityLogService.saveLog({
       userId,
       action: ActivityAction.CREATE_POST,
@@ -60,18 +96,32 @@ export class PostsService {
     const queryBuilder = this.postsRepository
       .createQueryBuilder('post')
       .leftJoinAndSelect('post.author', 'author')
-      .addSelect(['author.id', 'author.firstName', 'author.lastName'])
+      .select([
+        'post.id',
+        'post.title',
+        'post.content',
+        'post.coverImage',
+        'post.status',
+        'post.createdAt',
+        'post.updatedAt',
+        'author.id',
+        'author.firstName',
+        'author.lastName',
+        'author.role',
+      ])
       .where('post.status = :status', { status: PostStatus.PUBLISHED })
-      .andWhere('post.deletedAt IS NULL'); // Exclude soft-deleted
+      .andWhere('post.deletedAt IS NULL')
+      .andWhere('author.isActive = :isActive', { isActive: true });
 
     // Search by title
     if (query.search) {
-      queryBuilder.andWhere('post.title ILIKE :search', {
-        search: `%${query.search}%`,
-      });
+      queryBuilder.andWhere('post.title ILIKE :search', { search: `%${query.search}%` });
     }
 
-    queryBuilder.orderBy('post.createdAt', 'DESC').skip(skip).take(limit);
+    queryBuilder
+      .orderBy('post.createdAt', 'DESC')
+      .skip(skip)
+      .take(limit);
 
     const [data, total] = await queryBuilder.getManyAndCount();
 
@@ -158,48 +208,82 @@ export class PostsService {
 
   // SINGLE POST
   async findOne(id: number, userId?: number, isAdmin?: boolean) {
-    const post = await this.postsRepository.findOne({
-      where: { id },
-      relations: {
-        author: true,
-        images: true,
-      },
-    });
+    const queryBuilder = this.postsRepository
+      .createQueryBuilder('post')
+      .withDeleted() // Required to find soft-deleted posts for permission checks
+      .leftJoinAndSelect('post.author', 'author')
+      .leftJoinAndSelect('post.images', 'images')
+      .select([
+        'post.id',
+        'post.authorId',  
+        'post.title',
+        'post.content',
+        'post.coverImage',
+        'post.status',
+        'post.createdAt',
+        'post.deletedAt', 
+        'author.id',
+        'author.firstName',
+        'author.lastName',
+        'author.role',
+        'author.isActive', 
+        'images.id',
+        'images.url',
+        'images.altText',
+        'images.displayOrder',
+      ])
+      .where('post.id = :id', { id });
+
+    const post = await queryBuilder.getOne();
 
     if (!post) {
       throw new NotFoundException('Post not found');
     }
 
-    // Visibility rules:
-    //  If published → anyone can see
-    if (post.status === PostStatus.PUBLISHED && !post.deletedAt) {
-      return post;
+    //If author is inactive, ONLY admin can see the post
+    if (!post.author.isActive && !isAdmin) {
+      throw new ForbiddenException('You do not have permission to view this post');
     }
 
-    // If soft-deleted → only admin can see
+    // If published and NOT deleted → anyone (with active author) can see
+    if (post.status === PostStatus.PUBLISHED && !post.deletedAt) {
+      return this.cleanPostResponse(post);
+    }
+
+    // If soft-deleted  only admin can see
     if (post.deletedAt) {
       if (!isAdmin) {
-        throw new ForbiddenException(
-          'You do not have permission to view this post',
-        );
+        throw new ForbiddenException('You do not have permission to view this post');
       }
-      return post;
+      return this.cleanPostResponse(post);
     }
 
-    //  If draft/archived → only author or admin can see
-    if (
-      post.status === PostStatus.DRAFT ||
-      post.status === PostStatus.ARCHIVED
-    ) {
+    //  If draft/archived  only author or admin can see
+    if (post.status === PostStatus.DRAFT || post.status === PostStatus.ARCHIVED) {
       if (!userId || (post.authorId !== userId && !isAdmin)) {
-        throw new ForbiddenException(
-          'You do not have permission to view this post',
-        );
+        throw new ForbiddenException('You do not have permission to view this post');
       }
-      return post;
+      return this.cleanPostResponse(post);
     }
 
-    return post;
+    return this.cleanPostResponse(post);
+  }
+
+  private cleanPostResponse(post: any) {
+    const clean = { ...post };
+    // Remove fields used only for backend logic
+    delete clean.deletedAt;
+    delete clean.authorId;
+    
+    // Ensure author object is also clean
+    if (clean.author) {
+      delete clean.author.isActive;   
+      delete clean.author.createdAt;
+      delete clean.author.updatedAt;
+      delete clean.author.deletedAt;
+    }
+
+    return clean;
   }
 
   async updatePost(
@@ -207,12 +291,51 @@ export class PostsService {
     userId: number,
     updatePostDto: UpdatePostDto,
     metadata?: LogMetadata,
-    files?: { coverImage?: Express.Multer.File[]; images?: Express.Multer.File[] }
+    files?: { coverImage?: Express.Multer.File[]; images?: Express.Multer.File[] },
   ) {
     const post = await this.findPostForUser(id, userId);
 
+    // Update text fields
     Object.assign(post, updatePostDto);
+
+    // Handle new cover image (replaces old one)
+    if (files?.coverImage && files.coverImage.length > 0) {
+      // TODO: Delete old cover image from R2 if it exists
+      const coverFile = files.coverImage[0];
+      const { url } = await this.r2Service.uploadFile(coverFile, `posts/${post.id}/cover`);
+      post.coverImage = url;
+    }
+
     const updatedPost = await this.postsRepository.save(post);
+
+    // Handle new images (appends to existing ones)
+    if (files?.images && files.images.length > 0) {
+      const existingImages = await this.postImagesRepository.find({
+        where: { postId: post.id },
+      });
+
+      const imageRecords: PostImage[] = [];
+
+      for (let i = 0; i < files.images.length; i++) {
+        const imageFile = files.images[i];
+        const { url, key } = await this.r2Service.uploadFile(
+          imageFile,
+          `posts/${post.id}/images`,
+        );
+
+        const imageRecord = this.postImagesRepository.create({
+          url,
+          key,
+          altText: `Image ${existingImages.length + i + 1}`,
+          displayOrder: existingImages.length + i,
+          postId: post.id,
+        });
+
+        imageRecords.push(imageRecord);
+      }
+
+      await this.postImagesRepository.save(imageRecords);
+    }
 
     await this.activityLogService.saveLog({
       userId,
