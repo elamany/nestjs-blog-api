@@ -41,7 +41,8 @@ export class R2Service {
       this.logger.log(`Successfully uploaded file to R2: ${key}`);
       return { url, key };
     } catch (error) {
-      this.logger.error(`Failed to upload file to R2: ${error.message}`);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Failed to upload file to R2: ${errorMessage}`);
       throw new Error('File upload failed');
     }
   }
@@ -56,7 +57,8 @@ export class R2Service {
       await this.s3Client.send(command);
       this.logger.log(`Successfully deleted file from R2: ${key}`);
     } catch (error) {
-      this.logger.error(`Failed to delete file from R2: ${error.message}`);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Failed to delete file from R2:: ${errorMessage}`);
       // Don't throw here, we still want to clean up the database even if R2 fails
     }
   }
