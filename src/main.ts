@@ -1,25 +1,47 @@
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe, ClassSerializerInterceptor } from '@nestjs/common'; 
-import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module';
+import { ValidationPipe } from '@nestjs/common';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
-  app.useGlobalInterceptors(new ClassSerializerInterceptor(app.get('Reflector')));
-
   app.useGlobalPipes(
     new ValidationPipe({
-      whitelist: true,
+      whitelist: true, 
       forbidNonWhitelisted: true,
       transform: true,
     }),
   );
 
-  const configService = app.get(ConfigService);
-  const port = configService.get<number>('PORT', 3000);
+  app.enableCors();
 
-  await app.listen(port, '0.0.0.0');
-  console.log(`Application running on: http://localhost:${port}`);
+  const config = new DocumentBuilder()
+    .setTitle('NestJS Blog API')
+    .setDescription('Production-ready blog API with R2 image processing')
+    .setVersion('1.0')
+    .addBearerAuth(
+      {
+        type: 'http',
+        scheme: 'bearer',
+        bearerFormat: 'JWT',
+        name: 'JWT',
+        description: 'Enter your JWT access token',
+        in: 'header',
+      },
+      'JWT-auth', 
+    )
+    .build();
+
+  const document = SwaggerModule.createDocument(app, config);
+  
+  SwaggerModule.setup('api', app, document);
+
+  const port = process.env.PORT || 3000;
+  await app.listen(port);
+  
+  console.log(`Application is running on: http://localhost:${port}`);
+  console.log(`Swagger documentation: http://localhost:${port}/api`);
 }
+
 bootstrap();
