@@ -31,6 +31,7 @@ export class PostsService {
     userId: number,
     createPostDto: CreatePostDto,
     metadata?: LogMetadata,
+    files?: { coverImage?: Express.Multer.File[]; images?: Express.Multer.File[] }
   ) {
     const post = this.postsRepository.create({
       ...createPostDto,
@@ -206,6 +207,7 @@ export class PostsService {
     userId: number,
     updatePostDto: UpdatePostDto,
     metadata?: LogMetadata,
+    files?: { coverImage?: Express.Multer.File[]; images?: Express.Multer.File[] }
   ) {
     const post = await this.findPostForUser(id, userId);
 
