@@ -9,6 +9,7 @@ import { AuthModule } from './auth/auth.module';
 import { ActivityLogModule } from './common/activity-log.module';
 //import { ActivityLogInterceptor } from './common/interceptors/activity-log.interceptor';
 import { AdminModule } from './admin/admin.module';
+import { PostsModule } from './posts/posts.module';
 
 @Module({
   imports: [
@@ -45,6 +46,7 @@ import { AdminModule } from './admin/admin.module';
     AuthModule,
     ActivityLogModule,
     AdminModule, 
+    PostsModule,
   ],
   providers: [
     {
